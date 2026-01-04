@@ -31,10 +31,12 @@ Name: "autostart"; Description: "Start Keypass on Windows startup"; GroupDescrip
 [Files]
 ; Include all published files
 Source: "..\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Installer/shortcut icon
+Source: "..\dollar.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Keypass"; Filename: "{app}\Keypass.exe"
-Name: "{commondesktop}\Keypass"; Filename: "{app}\Keypass.exe"; Tasks: desktopicon
+Name: "{group}\Keypass"; Filename: "{app}\Keypass.exe"; IconFilename: "{app}\dollar.ico"
+Name: "{commondesktop}\Keypass"; Filename: "{app}\Keypass.exe"; IconFilename: "{app}\dollar.ico"; Tasks: desktopicon
 
 [Registry]
 ; Autostart (optional task)

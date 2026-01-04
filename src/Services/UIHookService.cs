@@ -18,6 +18,7 @@ namespace Keypass.Services
         private static IntPtr mouseHookHandle;
         private static LowLevelMouseProc mouseProc;
         private static string logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Keypass", "debug.log");
+        private const bool EnableLogging = false; // Disable debug logging for release
         
         // Store credentials being typed
         private static string capturedUsername = "";
@@ -34,6 +35,8 @@ namespace Keypass.Services
         private static bool inMultiPageLogin = false; // Track if we're in multi-page login flow (e.g., Google)
         private static Credential pendingMultiPageCredential = null; // Store selected credential for multi-page autofill
             private static string multiPageLoginWebsite = ""; // Store website title from username page for multi-page logins
+        private static bool passwordAutoFillScheduled = false; // Prevent duplicate password autofill timers on multi-page sites
+        private static bool passwordFillAwaitingKeystroke = false; // Wait for user's first key on password page before filling
         
         private static List<string> loginKeywords = new List<string> 
         { 
@@ -116,6 +119,7 @@ namespace Keypass.Services
 
         private static void Log(string message)
         {
+            if (!EnableLogging) return;
             try
             {
                 string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
@@ -130,9 +134,12 @@ namespace Keypass.Services
         {
             try
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(logPath));
-                File.WriteAllText(logPath, $"=== Keypass Debug Log Started at {DateTime.Now} ==={Environment.NewLine}");
-                Log("UIHookService Initialize() called");
+                if (EnableLogging)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(logPath));
+                    File.WriteAllText(logPath, $"=== Keypass Debug Log Started at {DateTime.Now} ==={Environment.NewLine}");
+                    Log("UIHookService Initialize() called");
+                }
                 
                 keyboardProc = KeyboardHookCallback;
                 IntPtr ptrModule = GetModuleHandle(Process.GetCurrentProcess().MainModule.ModuleName);
@@ -216,49 +223,11 @@ namespace Keypass.Services
                             inMultiPageLogin = true; // Enable multi-page login mode
                         }
                         
-                        // Auto-fill password if we're in multi-page mode and have pending credential
+                        // Detect password page for multi-page flow: set a flag, but only fill after first user keystroke
                         if (isLoginForm && inMultiPageLogin && pendingMultiPageCredential != null)
                         {
-                            Log("[AUTO-FILL PASSWORD PAGE] Detected password page, auto-filling password");
-                            System.Windows.Forms.Timer autoFillTimer = new System.Windows.Forms.Timer();
-                            autoFillTimer.Interval = 500; // Wait for page to be ready
-                            autoFillTimer.Tick += (s, e) =>
-                            {
-                                autoFillTimer.Stop();
-                                try
-                                {
-                                    var targetHandle = GetForegroundWindow();
-                                    SetForegroundWindow(targetHandle);
-                                    System.Threading.Thread.Sleep(100);
-                                    
-                                    suppressCapture = true;
-                                    Log("[AUTO-FILL PASSWORD] Filling password field...");
-                                    SendKeys.SendWait("^a");  // Select all
-                                    System.Threading.Thread.Sleep(50);
-                                    SendKeys.SendWait("{DELETE}");
-                                    System.Threading.Thread.Sleep(50);
-                                    SendKeys.SendWait(pendingMultiPageCredential.Password);
-                                    Log("[AUTO-FILL PASSWORD] Password filled!");
-                                    
-                                    // Clear pending credential after use
-                                    pendingMultiPageCredential = null;
-                                                                        multiPageLoginWebsite = "";
-                                                                        // Reset suggestion state so future sites can show popup again
-                                                                        suggestionShownForWindow = false;
-                                                                        usernameFieldActive = false;
-                                                                        fieldCounter = 0;
-                                                                        inMultiPageLogin = false;
-                                    
-                                    System.Threading.Thread.Sleep(200);
-                                    suppressCapture = false;
-                                }
-                                catch (Exception ex)
-                                {
-                                    Log($"[AUTO-FILL PASSWORD ERROR] {ex.Message}");
-                                    suppressCapture = false;
-                                }
-                            };
-                            autoFillTimer.Start();
+                            Log("[AUTO-FILL PASSWORD PAGE] Password page detected - waiting for first user key before filling");
+                            passwordFillAwaitingKeystroke = true;
                         }
                     }
 
@@ -267,10 +236,85 @@ namespace Keypass.Services
                         lastWebsite = windowTitle;
                         lastLoginWindowHandle = windowHandle;
 
+                        // Fallback disabled: we now wait for user's first key to trigger password fill
+
                         // Skip capturing our own injected keys; only allow Enter to submit
                         if (suppressCapture && vkCode != VK_RETURN)
                         {
                             return (IntPtr)0;
+                        }
+
+                        // If we're waiting for the first key on a multi-page password page, trigger autofill now
+                        if (passwordFillAwaitingKeystroke && inMultiPageLogin && pendingMultiPageCredential != null)
+                        {
+                            // Only react to a real character key (not control keys)
+                            char keyCharTrigger = GetCharFromVKey(vkCode);
+                            if (!char.IsControl(keyCharTrigger) && keyCharTrigger != '\0')
+                            {
+                                passwordFillAwaitingKeystroke = false;
+
+                                if (passwordAutoFillScheduled)
+                                {
+                                    Log("[AUTO-FILL PASSWORD] Keystroke trigger skipped (already scheduled)");
+                                }
+                                else
+                                {
+                                    passwordAutoFillScheduled = true;
+                                    Log("[AUTO-FILL PASSWORD] First user key detected on password page - filling now");
+                                    var credential = pendingMultiPageCredential; // snapshot
+                                    if (credential == null)
+                                    {
+                                        Log("[AUTO-FILL PASSWORD] Keystroke trigger aborted - credential null");
+                                        passwordAutoFillScheduled = false;
+                                    }
+                                    else
+                                    {
+                                        System.Windows.Forms.Timer autoFillTimer = new System.Windows.Forms.Timer();
+                                        autoFillTimer.Interval = 150; // short delay to let field be focused
+                                        autoFillTimer.Tick += (s, e) =>
+                                        {
+                                            autoFillTimer.Stop();
+                                            try
+                                            {
+                                                var targetHandle = GetForegroundWindow();
+                                                SetForegroundWindow(targetHandle);
+                                                System.Threading.Thread.Sleep(60);
+
+                                                suppressCapture = true;
+                                                Log("[AUTO-FILL PASSWORD] Filling password field (keystroke trigger)...");
+                                                SendKeys.SendWait("^a");
+                                                System.Threading.Thread.Sleep(30);
+                                                SendKeys.SendWait("{DELETE}");
+                                                System.Threading.Thread.Sleep(30);
+                                                SendKeys.SendWait(credential.Password);
+                                                capturedPassword = credential.Password;
+                                                capturedUsername = string.IsNullOrEmpty(capturedUsername) ? credential.Username : capturedUsername;
+                                                Log("[AUTO-FILL PASSWORD] Password filled (keystroke trigger)!");
+
+                                                pendingMultiPageCredential = null;
+                                                inMultiPageLogin = false;
+                                                multiPageLoginWebsite = "";
+                                                suggestionShownForWindow = false;
+                                                usernameFieldActive = false;
+                                                fieldCounter = 2;
+                                                passwordAutoFillScheduled = false;
+
+                                                System.Threading.Thread.Sleep(150);
+                                                suppressCapture = false;
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Log($"[AUTO-FILL PASSWORD ERROR] {ex.Message}");
+                                                passwordAutoFillScheduled = false;
+                                                suppressCapture = false;
+                                            }
+                                        };
+                                        autoFillTimer.Start();
+                                    }
+                                }
+                                // Swallow the triggering keystroke so we don't type it into the password box
+                                return (IntPtr)1;
+                            }
                         }
 
                         // Show suggestions ONLY when user starts typing in username field
@@ -441,6 +485,14 @@ namespace Keypass.Services
 
                     if (isLoginForm)
                     {
+                        // If we arrive on a different login window while still holding old data (e.g., from YouTube), clear it
+                        bool isNewLoginWindow = !string.Equals(lastWebsite, windowTitle, StringComparison.OrdinalIgnoreCase);
+                        if (!inMultiPageLogin && pendingMultiPageCredential == null && isNewLoginWindow && (!string.IsNullOrEmpty(capturedUsername) || !string.IsNullOrEmpty(capturedPassword)))
+                        {
+                            Log("[RESET] Switched to a new login window - clearing captured credentials to avoid carry-over");
+                            ResetInput();
+                        }
+
                         lastWebsite = windowTitle;
                         lastLoginWindowHandle = windowHandle;
                         
@@ -459,57 +511,24 @@ namespace Keypass.Services
                             fieldCounter = 2; // Next field will be password
                         }
                         // If we are already in multi-page mode and have a pending credential, auto-fill password on this page
-                        else if (isLoginForm && inMultiPageLogin && pendingMultiPageCredential != null && string.IsNullOrEmpty(capturedPassword))
+                        else if (isLoginForm && inMultiPageLogin && pendingMultiPageCredential != null)
                         {
-                            Log("[AUTO-FILL PASSWORD PAGE] Detected password page via mouse click, auto-filling password");
-                            System.Windows.Forms.Timer autoFillTimer = new System.Windows.Forms.Timer();
-                            autoFillTimer.Interval = 300; // allow the field to be ready
-                            autoFillTimer.Tick += (s, e) =>
-                            {
-                                autoFillTimer.Stop();
-                                try
-                                {
-                                    var targetHandle = GetForegroundWindow();
-                                    SetForegroundWindow(targetHandle);
-                                    System.Threading.Thread.Sleep(100);
-
-                                    suppressCapture = true;
-                                    Log("[AUTO-FILL PASSWORD] Filling password field...");
-                                    SendKeys.SendWait("^a");
-                                    System.Threading.Thread.Sleep(50);
-                                    SendKeys.SendWait("{DELETE}");
-                                    System.Threading.Thread.Sleep(50);
-                                    SendKeys.SendWait(pendingMultiPageCredential.Password);
-                                    Log("[AUTO-FILL PASSWORD] Password filled!");
-
-                                    pendingMultiPageCredential = null;
-                                    inMultiPageLogin = false;
-                                    multiPageLoginWebsite = "";
-
-                                    // Reset suggestion state to allow future popups
-                                    suggestionShownForWindow = false;
-                                    usernameFieldActive = false;
-                                    fieldCounter = 0;
-
-                                    System.Threading.Thread.Sleep(200);
-                                    suppressCapture = false;
-                                }
-                                catch (Exception ex)
-                                {
-                                    Log($"[AUTO-FILL PASSWORD ERROR] {ex.Message}");
-                                    suppressCapture = false;
-                                }
-                            };
-                            autoFillTimer.Start();
+                            // On password page for multi-page login: don't auto-fill yet, wait for first keypress
+                            Log("[AUTO-FILL PASSWORD PAGE] Mouse detected password page - waiting for first keypress to fill");
+                            passwordFillAwaitingKeystroke = true;
                         }
                         else if (string.IsNullOrEmpty(capturedUsername) && string.IsNullOrEmpty(capturedPassword))
                         {
                             // Fresh login form with no captured data - reset all state
                             Log("[MOUSE] Fresh login form - resetting suggestion flag");
+                            capturedUsername = "";
+                            capturedPassword = "";
                             suggestionShownForWindow = false;
                             inMultiPageLogin = false;
                             fieldCounter = 0;
                             pendingMultiPageCredential = null;
+                            multiPageLoginWebsite = "";
+                            lastWebsite = "";
                         }
                     }
                 }
@@ -932,6 +951,8 @@ namespace Keypass.Services
             usernameFieldActive = false;
             inMultiPageLogin = false;
             pendingMultiPageCredential = null;
+            passwordAutoFillScheduled = false;
+            passwordFillAwaitingKeystroke = false;
         }
 
         private static void ShowSuggestions(string windowTitle)
@@ -999,10 +1020,13 @@ namespace Keypass.Services
                                     SendKeys.SendWait(selected.Username);
                                     Log("[AUTOFILL MULTI-PAGE] Username filled, waiting for password page");
                                     
-                                    // Store credential for password page
+                                    // Store credential and the originating window title for password page
                                     pendingMultiPageCredential = selected;
                                     inMultiPageLogin = true;
                                     fieldCounter = 2; // Next will be password
+                                    // Capture the username-page title so we don't rely on password-page title
+                                    if (!string.IsNullOrEmpty(windowTitle))
+                                        multiPageLoginWebsite = windowTitle;
                                 }
                                 else
                                 {
@@ -1046,6 +1070,11 @@ namespace Keypass.Services
                                         capturedUsername = "";
                                         capturedPassword = "";
                                         fieldCounter = 0;
+                                        pendingMultiPageCredential = null;
+                                        multiPageLoginWebsite = "";
+                                        suggestionShownForWindow = false;
+                                        usernameFieldActive = false;
+                                        passwordAutoFillScheduled = false;
                                     }
                                 };
                                 restoreTimer.Start();
