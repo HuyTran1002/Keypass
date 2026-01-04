@@ -1,0 +1,10 @@
+.vscode
+bin
+obj
+publish
+installer/output
+installer/installer/output
+*.db
+*.json
+.vs
+.vs/

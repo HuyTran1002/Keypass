@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <StartupObject>Keypass.Program</StartupObject>
+    <Version>1.0.0</Version>
+    <Authors>Your Name</Authors>
+    <Product>Keypass - Password Manager</Product>
+    <Description>A password manager application that runs in system tray and auto-fills login credentials</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Data.SQLite" Version="1.0.118" />
+  </ItemGroup>
+
+</Project>
